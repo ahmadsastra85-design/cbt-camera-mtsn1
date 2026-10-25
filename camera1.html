@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verifikasi Kamera CBT</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;padding:20px;background:#f1f5f9;color:#1e293b}
+  main{max-width:560px;margin:0 auto;background:#fff;border-radius:16px;padding:20px;box-shadow:0 8px 24px #0001}
+  h1{font-size:1.4rem;margin-top:0}
+  .note{font-size:.9rem;color:#475569;line-height:1.5}
+  video{display:block;width:100%;background:#000;border-radius:12px;aspect-ratio:4/3;object-fit:cover}
+  label{display:block;font-weight:650;margin:14px 0 6px}
+  select,button{width:100%;border:0;border-radius:10px;padding:13px;font-size:1rem}
+  select{border:1px solid #cbd5e1;background:#fff;color:#1e293b}
+  button{margin-top:10px;font-weight:650;background:#2563eb;color:white;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  #stop{background:#475569}
+  #status{background:#f1f5f9;border-radius:10px;padding:12px;margin:12px 0;line-height:1.5;overflow-wrap:anywhere}
+  .ok{background:#dcfce7!important;color:#166534}
+  .warn{background:#fff7ed!important;color:#9a3412}
+</style>
+</head>
+<body>
+<main>
+  <h1>Verifikasi Wajah CBT</h1>
+  <p class="note">Foto wajah akan diambil saat verifikasi dan disimpan untuk pengawasan ujian. Lanjutkan sesuai pemberitahuan madrasah. Izinkan akses kamera saat diminta. Jika tampilan hitam, pilih kamera fisik dari daftar di bawah.</p>
+
+  <label for="cameraSelect">Pilih perangkat kamera</label>
+  <select id="cameraSelect" disabled>
+    <option value="">Tekan Aktifkan Kamera untuk mendeteksi perangkat</option>
+  </select>
+
+  <video id="video" autoplay muted playsinline></video>
+  <div id="status" role="status" aria-live="polite">Tekan Aktifkan Kamera untuk memulai.</div>
+  <button id="start">Aktifkan Kamera</button>
+  <button id="verify" disabled>Verifikasi dan Kembali ke Ujian</button>
+  <button id="stop" disabled>Matikan Kamera</button>
+</main>
+
+<script type="module">
+import { FaceDetector, FilesetResolver } from
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+
+const video = document.getElementById('video');
+const statusBox = document.getElementById('status');
+const startBtn = document.getElementById('start');
+const verifyBtn = document.getElementById('verify');
+const stopBtn = document.getElementById('stop');
+const cameraSelect = document.getElementById('cameraSelect');
+
+let stream = null;
+let detector = null;
+let detectorPromise = null;
+let busy = false;
+
+function status(message, type='') {
+  statusBox.textContent = message;
+  statusBox.className = type;
+}
+
+function sendResult(success, message, photoDataUrl=null) {
+  // Keep '*' here for compatibility with Apps Script redirects.
+  // The parent page validates both event.source and event.origin.
+  if (window.opener && !window.opener.closed) {
+    window.opener.postMessage({
+      type: 'CBT_FACE_RESULT',
+      success: success,
+      message: message,
+      photoDataUrl: photoDataUrl
+    }, '*');
+  }
+}
+
+async function stopCamera() {
+  if (stream) {
+    stream.getTracks().forEach(track => {
+      try { track.stop(); } catch (_) {}
+    });
+  }
+  stream = null;
+  video.pause();
+  video.srcObject = null;
+  verifyBtn.disabled = true;
+  stopBtn.disabled = true;
+}
+
+async function refreshCameraList(preferredId='') {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cameras = devices.filter(device => device.kind === 'videoinput');
+  cameraSelect.replaceChildren();
+
+  if (!cameras.length) {
+    cameraSelect.add(new Option('Tidak ada kamera terdeteksi', ''));
+    cameraSelect.disabled = true;
+    return;
+  }
+
+  cameras.forEach((device, index) => {
+    let label = device.label || `Kamera ${index + 1}`;
+    // Make virtual cameras easier to recognize without assuming they are bad.
+    cameraSelect.add(new Option(label, device.deviceId));
+  });
+
+  const activeId = preferredId || (stream && stream.getVideoTracks()[0]?.getSettings?.().deviceId) || '';
+  if (activeId && cameras.some(device => device.deviceId === activeId)) {
+    cameraSelect.value = activeId;
+  }
+  cameraSelect.disabled = false;
+}
+
+async function loadFaceDetector() {
+  if (detector) return detector;
+  if (!detectorPromise) {
+    detectorPromise = (async () => {
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      );
+      return FaceDetector.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+          delegate: 'CPU'
+        },
+        runningMode: 'VIDEO',
+        minDetectionConfidence: 0.6
+      });
+    })();
+  }
+  detector = await detectorPromise;
+  return detector;
+}
+
+async function startCamera(deviceId='') {
+  if (busy) return;
+  busy = true;
+  startBtn.disabled = true;
+  verifyBtn.disabled = true;
+  status('Meminta izin dan mengaktifkan kamera…');
+
+  try {
+    if (!window.isSecureContext) {
+      throw new Error('Halaman kamera harus dibuka melalui HTTPS.');
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Akses kamera tidak tersedia. Buka halaman ini langsung di Chrome terbaru, bukan di iframe.');
+    }
+
+    await stopCamera();
+
+    const videoConstraint = deviceId
+      ? {deviceId: {exact: deviceId}, width: {ideal: 640}, height: {ideal: 480}}
+      : {facingMode: {ideal: 'user'}, width: {ideal: 640}, height: {ideal: 480}};
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: videoConstraint
+    });
+
+    video.srcObject = stream;
+    await video.play();
+
+    // Device labels become available after camera permission is granted.
+    await refreshCameraList(stream.getVideoTracks()[0]?.getSettings?.().deviceId || deviceId);
+
+    // Do not claim success until the browser actually receives video frames.
+    await new Promise((resolve, reject) => {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+          video.videoWidth > 0 && video.videoHeight > 0) {
+        resolve();
+        return;
+      }
+      let done = false;
+      const finish = (error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        video.removeEventListener('loadeddata', onData);
+        error ? reject(error) : resolve();
+      };
+      const onData = () => {
+        if (video.videoWidth > 0 && video.videoHeight > 0) finish();
+      };
+      const timer = setTimeout(() => finish(
+        new Error('Kamera tersambung tetapi tidak mengirim gambar. Pilih kamera fisik lain dari daftar.')
+      ), 8000);
+      video.addEventListener('loadeddata', onData);
+    });
+
+    status('Gambar kamera masuk. Memuat deteksi wajah…');
+    await loadFaceDetector();
+    status(`Kamera siap (${video.videoWidth}×${video.videoHeight}). Pastikan hanya wajah peserta yang terlihat, lalu tekan Verifikasi. Jika layar hitam, pilih kamera fisik lain dari daftar.`, 'ok');
+    verifyBtn.disabled = false;
+    stopBtn.disabled = false;
+  } catch (error) {
+    await stopCamera();
+    startBtn.disabled = false;
+    const name = error?.name || '';
+    let message = error?.message || String(error);
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      message = 'Izin kamera ditolak. Klik ikon kamera di bilah alamat Chrome, pilih Izinkan, lalu muat ulang halaman.';
+    } else if (name === 'NotFoundError') {
+      message = 'Kamera tidak ditemukan. Sambungkan atau aktifkan kamera perangkat.';
+    } else if (name === 'NotReadableError') {
+      message = 'Kamera sedang digunakan aplikasi lain. Tutup aplikasi kamera lain, lalu coba lagi.';
+    } else if (name === 'OverconstrainedError') {
+      message = 'Kamera yang dipilih tidak tersedia. Pilih perangkat kamera lain.';
+    }
+    status('Kamera gagal diaktifkan: ' + message, 'warn');
+    try { await refreshCameraList(deviceId); } catch (_) {}
+  } finally {
+    busy = false;
+  }
+}
+
+function captureFacePhoto() {
+  if (!video.videoWidth || !video.videoHeight ||
+      video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    throw new Error('Belum ada gambar kamera yang bisa diambil. Aktifkan kamera lagi.');
+  }
+  const maxWidth = 640;
+  const scale = Math.min(1, maxWidth / video.videoWidth);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  const ctx = canvas.getContext('2d', {alpha:false});
+  if (!ctx) throw new Error('Tidak dapat menyiapkan gambar foto.');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.72);
+}
+
+startBtn.addEventListener('click', () => startCamera(cameraSelect.value));
+
+cameraSelect.addEventListener('change', () => {
+  const selectedId = cameraSelect.value;
+  if (selectedId) startCamera(selectedId);
+});
+
+stopBtn.addEventListener('click', async () => {
+  await stopCamera();
+  startBtn.disabled = false;
+  status('Kamera dimatikan. Pilih kamera lain atau tekan Aktifkan Kamera untuk mencoba lagi.');
+});
+
+verifyBtn.addEventListener('click', async () => {
+  verifyBtn.disabled = true;
+  try {
+    if (!detector || !stream || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      throw new Error('Aktifkan kamera terlebih dahulu.');
+    }
+    const detections = detector.detectForVideo(video, performance.now()).detections || [];
+    if (detections.length === 0) {
+      status('Wajah belum terdeteksi. Perbaiki pencahayaan dan posisi wajah, lalu coba lagi.', 'warn');
+      verifyBtn.disabled = false;
+      return;
+    }
+    if (detections.length > 1) {
+      status('Terdeteksi lebih dari satu wajah. Pastikan hanya satu peserta terlihat.', 'warn');
+      verifyBtn.disabled = false;
+      return;
+    }
+
+    const photoDataUrl = captureFacePhoto();
+    status('Wajah terdeteksi. Foto berhasil diambil dan dikirim ke halaman CBT.', 'ok');
+    sendResult(true, 'Verifikasi wajah berhasil.', photoDataUrl);
+    await stopCamera();
+    setTimeout(() => window.close(), 600);
+  } catch (error) {
+    status('Verifikasi gagal: ' + (error?.message || String(error)), 'warn');
+    verifyBtn.disabled = false;
+    sendResult(false, 'Verifikasi wajah gagal.');
+  }
+});
+
+window.addEventListener('beforeunload', () => {
+  if (stream) stream.getTracks().forEach(track => track.stop());
+});
+
+try { await refreshCameraList(); } catch (_) {}
+</script>
+</body>
+</html>
