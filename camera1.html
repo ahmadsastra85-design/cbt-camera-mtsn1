@@ -14,13 +14,12 @@
   button{width:100%;border:0;border-radius:10px;padding:14px;margin-top:10px;font-size:1rem;font-weight:650;background:#2563eb;color:white}
   button:disabled{opacity:.5}
   .ok{background:#dcfce7!important;color:#166534}
-  .note{font-size:.88rem;color:#475569;line-height:1.5}
 </style>
 </head>
 <body>
 <main>
   <h1>Verifikasi Wajah</h1>
-  <p class="note">Verifikasi ini membantu pihak sekolah memastikan bahwa peserta yang mengikuti ujian adalah siswa yang namanya digunakan saat login. Kamera hanya digunakan setelah Anda mengizinkan akses. Foto verifikasi dikirim ke sistem ujian untuk pemeriksaan identitas sesuai ketentuan sekolah. Halaman ini harus dibuka melalui HTTPS.</p>
+
   <video id="video" autoplay muted playsinline aria-label="Tampilan kamera peserta"></video>
   <div id="status" role="status" aria-live="polite">Tekan Aktifkan Kamera untuk memulai verifikasi.</div>
   <button id="start">Aktifkan Kamera</button>
