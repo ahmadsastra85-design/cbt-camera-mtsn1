@@ -3,15 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Verifikasi Kamera CBT</title>
+<title>Verifikasi Wajah SIMAEXAM</title>
 <style>
+  *{box-sizing:border-box}
   body{font-family:system-ui,sans-serif;margin:0;padding:20px;background:#f1f5f9;color:#1e293b}
   main{max-width:520px;margin:0 auto;background:#fff;border-radius:16px;padding:20px;box-shadow:0 8px 24px #0001}
   h1{font-size:1.4rem;margin-top:0}
   video{width:100%;background:#0f172a;border-radius:12px;aspect-ratio:4/3;object-fit:cover}
-  #status,#objectStatus{background:#f1f5f9;border-radius:10px;padding:12px;margin:12px 0;line-height:1.5}
-  #objectStatus{border-left:4px solid #94a3b8;font-size:.92rem}
-  #objectStatus.detected{background:#fef3c7;border-left-color:#d97706;color:#92400e}
+  #status{background:#f1f5f9;border-radius:10px;padding:12px;margin:12px 0;line-height:1.5}
   button{width:100%;border:0;border-radius:10px;padding:14px;margin-top:10px;font-size:1rem;font-weight:650;background:#2563eb;color:white}
   button:disabled{opacity:.5}
   .ok{background:#dcfce7!important;color:#166534}
@@ -20,108 +19,29 @@
 </head>
 <body>
 <main>
-  <h1>Verifikasi Wajah CBT</h1>
-  <p class="note">Foto wajah akan diambil saat verifikasi dan disimpan untuk pengawasan ujian. Deteksi HP hanyalah pemeriksaan benda yang masuk bingkai kamera, bukan deteksi HP lain di luar pandangan kamera. Lanjutkan hanya setelah membaca pemberitahuan madrasah. Halaman ini harus dibuka melalui HTTPS.</p>
-  <video id="video" autoplay muted playsinline></video>
-  <div id="status" role="status" aria-live="polite">Tekan Aktifkan Kamera untuk memulai.</div>
-  <div id="objectStatus" role="status" aria-live="polite">Deteksi objek HP belum aktif.</div>
+  <h1>Verifikasi Wajah</h1>
+  <p class="note">Verifikasi ini membantu pihak sekolah memastikan bahwa peserta yang mengikuti ujian adalah siswa yang namanya digunakan saat login. Kamera hanya digunakan setelah Anda mengizinkan akses. Foto verifikasi dikirim ke sistem ujian untuk pemeriksaan identitas sesuai ketentuan sekolah. Halaman ini harus dibuka melalui HTTPS.</p>
+  <video id="video" autoplay muted playsinline aria-label="Tampilan kamera peserta"></video>
+  <div id="status" role="status" aria-live="polite">Tekan Aktifkan Kamera untuk memulai verifikasi.</div>
   <button id="start">Aktifkan Kamera</button>
   <button id="verify" disabled>Verifikasi dan Kembali ke Ujian</button>
 </main>
 <script type="module">
-import { FaceDetector, ObjectDetector, FilesetResolver } from
+import { FaceDetector, FilesetResolver } from
   'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 
 const video = document.getElementById('video');
 const statusBox = document.getElementById('status');
 const startBtn = document.getElementById('start');
 const verifyBtn = document.getElementById('verify');
-const objectStatusBox = document.getElementById('objectStatus');
 let stream = null;
 let detector = null;
-let objectDetector = null;
-let objectDetectionTimer = null;
-let lastObjectDetectionAt = 0;
-let consecutivePhoneFrames = 0;
-let phoneWasVisible = false;
-let phoneObservationSent = false;
-let lastVideoFrameTime = -1;
-const OBJECT_DETECTION_INTERVAL_MS = 500;
-const PHONE_CONFIDENCE_THRESHOLD = 0.60; // Diagnostik saja; bukan bukti kecurangan.
-const PHONE_REQUIRED_CONSECUTIVE_FRAMES = 2;
 
 function status(message, ok=false) {
   statusBox.textContent = message;
   statusBox.className = ok ? 'ok' : '';
 }
-function setObjectStatus(message, detected=false) {
-  objectStatusBox.textContent = message;
-  objectStatusBox.classList.toggle('detected', detected);
-}
-function startObjectDetection() {
-  if (objectDetectionTimer) clearInterval(objectDetectionTimer);
-  lastObjectDetectionAt = 0;
-  consecutivePhoneFrames = 0;
-  phoneWasVisible = false;
-  phoneObservationSent = false;
-  lastVideoFrameTime = -1;
-  setObjectStatus('Model deteksi HP berhasil dimuat. Arahkan HP uji lain ke dalam bingkai kamera selama beberapa detik. Ambang indikasi 60%, minimal 2 frame; bukan bukti kecurangan.');
-  objectDetectionTimer = setInterval(() => {
-    if (!objectDetector || !stream || video.readyState < 2) return;
-    // Jangan menghitung gambar video yang sama sebagai tiga deteksi berbeda.
-    if (video.currentTime === lastVideoFrameTime) return;
-    lastVideoFrameTime = video.currentTime;
-    const now = performance.now();
-    if (now - lastObjectDetectionAt < OBJECT_DETECTION_INTERVAL_MS) return;
-    lastObjectDetectionAt = now;
-    try {
-      const result = objectDetector.detectForVideo(video, now);
-      const detections = result.detections || [];
-      const matches = detections.flatMap(item => item.categories || []).filter(cat =>
-        String(cat.categoryName || '').toLowerCase() === 'cell phone' &&
-        Number(cat.score || 0) >= PHONE_CONFIDENCE_THRESHOLD
-      );
-      const phone = matches.sort((a,b) => Number(b.score) - Number(a.score))[0];
-      if (phone) {
-        consecutivePhoneFrames += 1;
-        phoneWasVisible = true;
-        const confidence = Math.round(Number(phone.score) * 100);
-        if (consecutivePhoneFrames >= PHONE_REQUIRED_CONSECUTIVE_FRAMES) {
-          setObjectStatus('Indikasi objek menyerupai HP (' + confidence + '%). Dicatat sebagai observasi untuk ditinjau, bukan bukti kecurangan.', true);
-          // Hanya satu observasi tiap verifikasi kamera; tanpa video/foto tambahan.
-          if (!phoneObservationSent) {
-            phoneObservationSent = true;
-            if (window.opener && !window.opener.closed) {
-              window.opener.postMessage({
-                type:'CBT_CAMERA_OBSERVATION',
-                eventId:'cam_' + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + '_' + String(Math.random()).slice(2)),
-                observation:'PHONE_LIKE_OBJECT',
-                confidence:Number(phone.score)
-              }, '*');
-            }
-          }
-        } else {
-          setObjectStatus('Objek menyerupai HP terdeteksi. Memvalidasi konsistensi deteksi (' + consecutivePhoneFrames + '/' + PHONE_REQUIRED_CONSECUTIVE_FRAMES + ').', true);
-        }
-      } else {
-        consecutivePhoneFrames = 0;
-        phoneWasVisible = false;
-        const top = detections.flatMap(item => item.categories || []).sort((a,b) => Number(b.score||0)-Number(a.score||0))[0];
-        setObjectStatus('Model aktif, tidak ada HP di atas ambang. Objek teratas: ' + (top ? top.categoryName + ' ' + Math.round(Number(top.score||0)*100) + '%' : 'tidak ada') + '. Pastikan HP berada di depan kamera.');
-      }
-    } catch (error) {
-      setObjectStatus('Deteksi objek mengalami kendala: ' + (error?.message || String(error)));
-    }
-  }, OBJECT_DETECTION_INTERVAL_MS);
-}
-function stopObjectDetection() {
-  if (objectDetectionTimer) clearInterval(objectDetectionTimer);
-  objectDetectionTimer = null;
-  if (objectDetector && typeof objectDetector.close === 'function') objectDetector.close();
-  objectDetector = null;
-  consecutivePhoneFrames = 0;
-  phoneWasVisible = false;
-}
+
 function sendResult(success, message, photoDataUrl=null) {
   if (window.opener && !window.opener.closed) {
     window.opener.postMessage({
@@ -129,6 +49,7 @@ function sendResult(success, message, photoDataUrl=null) {
     }, '*');
   }
 }
+
 function captureFacePhoto() {
   if (!video.videoWidth || !video.videoHeight) {
     throw new Error('Kamera belum siap mengambil foto.');
@@ -144,19 +65,19 @@ function captureFacePhoto() {
 }
 
 async function stopCamera() {
-  stopObjectDetection();
   if (detector && typeof detector.close === 'function') detector.close();
   detector = null;
   if (stream) stream.getTracks().forEach(track => track.stop());
   stream = null;
   video.srcObject = null;
 }
+
 startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
   try {
     if (!window.isSecureContext) throw new Error('Halaman kamera harus menggunakan HTTPS.');
     if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('Browser tidak menyediakan akses kamera. Buka halaman ini langsung di Chrome terbaru.');
+      throw new Error('Browser tidak menyediakan akses kamera. Buka halaman ini melalui Chrome terbaru.');
     }
     stream = await navigator.mediaDevices.getUserMedia({
       audio:false,
@@ -164,7 +85,7 @@ startBtn.addEventListener('click', async () => {
     });
     video.srcObject = stream;
     await video.play();
-    status('Kamera aktif. Memuat model deteksi wajah...');
+    status('Kamera aktif. Memuat sistem verifikasi wajah...');
     const vision = await FilesetResolver.forVisionTasks(
       'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
     );
@@ -176,38 +97,19 @@ startBtn.addEventListener('click', async () => {
       runningMode:'VIDEO',
       minDetectionConfidence:0.6
     });
-    status('Model wajah siap. Memuat model deteksi objek HP...');
-    // Deteksi objek opsional: kegagalan model HP tidak menggagalkan verifikasi wajah.
-    try {
-      objectDetector = await ObjectDetector.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath:'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite',
-          delegate:'CPU'
-        },
-        runningMode:'VIDEO',
-        maxResults:10,
-        scoreThreshold:PHONE_CONFIDENCE_THRESHOLD
-      });
-      startObjectDetection();
-    } catch (objectError) {
-      objectDetector = null;
-      setObjectStatus('Model HP GAGAL dimuat: ' + String(objectError?.message || objectError).slice(0,180) + '. Periksa jaringan dan hosting; wajah tetap dapat diverifikasi.');
-      console.warn('Model deteksi objek tidak tersedia:', objectError);
-    }
-    status('Kamera wajah siap. Pastikan hanya wajah peserta yang terlihat, lalu tekan Verifikasi.');
+    status('Kamera siap. Pastikan wajah terlihat jelas, lalu tekan Verifikasi.');
     verifyBtn.disabled = false;
   } catch (e) {
     await stopCamera();
-    setObjectStatus('Deteksi objek belum aktif karena model gagal dimuat atau kamera tidak tersedia.');
     startBtn.disabled = false;
     const name = e?.name || '';
     let msg = e?.message || String(e);
     if (name === 'NotAllowedError' || name === 'SecurityError') {
-      msg = 'Izin kamera ditolak. Izinkan kamera untuk halaman hosting ini di Chrome dan Setelan Android, lalu muat ulang halaman.';
+      msg = 'Izin kamera ditolak. Izinkan kamera untuk situs ini di Chrome, lalu muat ulang halaman.';
     } else if (name === 'NotFoundError') {
       msg = 'Kamera tidak ditemukan pada perangkat.';
     } else if (name === 'NotReadableError') {
-      msg = 'Kamera sedang digunakan aplikasi lain. Tutup aplikasi kamera lain dan coba lagi.';
+      msg = 'Kamera sedang digunakan aplikasi lain. Tutup aplikasi tersebut lalu coba lagi.';
     }
     status('Kamera gagal diaktifkan: ' + msg);
   }
@@ -231,7 +133,7 @@ verifyBtn.addEventListener('click', async () => {
       verifyBtn.disabled = false;
       return;
     }
-    status('Wajah terdeteksi. Mengambil foto dan mengirim ke CBT...', true);
+    status('Wajah terdeteksi. Mengirim foto verifikasi ke sistem ujian...', true);
     const photoDataUrl = captureFacePhoto();
     sendResult(true, 'Verifikasi wajah berhasil.', photoDataUrl);
     await stopCamera();
@@ -242,6 +144,7 @@ verifyBtn.addEventListener('click', async () => {
     sendResult(false, 'Verifikasi wajah gagal.');
   }
 });
+
 window.addEventListener('beforeunload', stopCamera);
 </script>
 </body>
